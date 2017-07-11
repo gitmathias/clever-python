@@ -214,7 +214,7 @@ class APIRequestor(object):
     rbody, rheaders, rcode = res['body'], res['headers'], res['code']
     try:
       error = resp['error']
-    except (KeyError, TypeError):
+    except (KeyError, TypeError) as err:
       raise APIError("Invalid response object from API: %r (HTTP response code was %d)" %
                      (rbody, rcode), rbody, rcode, resp)
 
@@ -280,10 +280,19 @@ class APIRequestor(object):
     return res, my_auth
 
   def interpret_response(self, http_res):
-    rbody, rcode= http_res['body'], http_res['code']
+    rbody, rcode, rheaders = http_res['body'], http_res['code'], http_res['headers']
+
+    # Get the encoding from the response to convert from byte string:
+    encoding = None
+    if 'Content-Type' in rheaders:
+      encoding = None if rheaders['Content-Type'].rfind('=') == -1 \
+                      else rheaders['Content-Type'].rsplit('=', 1)[-1]
+
+    rbody = rbody.decode(encoding)
     try:
-      resp = json.loads(rbody.decode()) if rcode != 429 else {'error': 'Too Many Requests'}
-    except Exception:
+      resp = json.loads(rbody, encoding) if rcode != 429 else {'error': 'Too Many Requests'}
+    except Exception as err:
+      # This block is extremely greedy - could be something else?
       raise APIError("Invalid response body from API: %s (HTTP response code was %d)" %
                      (rbody, rcode), rbody, rcode)
     if not (200 <= rcode < 300):
