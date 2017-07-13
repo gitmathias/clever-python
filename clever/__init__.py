@@ -90,6 +90,8 @@ global_auth = dict()
 api_base = 'https://api.clever.com'
 verify_ssl_certs = True
 
+# Manually set this value to True to skip Clever data types?
+USE_RAW_DATA = False
 
 def set_token(token):
   global global_auth
@@ -134,14 +136,15 @@ class TooManyRequestsError(CleverError):
     super(TooManyRequestsError, self).__init__(message, res['body'], res['code'])
     self.http_headers = res['headers']
 
-
 def convert_to_clever_object(klass, resp, auth):
   # TODO: to support includes we'll have to infer klass from resp['uri']
   if isinstance(resp, dict) and resp.get('data', None):
     if isinstance(resp['data'], list):
-      return [convert_to_clever_object(klass, i, auth) for i in resp['data']]
+      return [convert_to_clever_object(klass, i, auth) for i in resp['data']] \
+              if not USE_RAW_DATA else resp['data']
     elif isinstance(resp['data'], dict):
-      return klass.construct_from(resp['data'].copy(), auth)
+      return klass.construct_from(resp['data'].copy(), auth) \
+              if not USE_RAW_DATA else resp['data']
   elif isinstance(resp, six.string_types) or isinstance(resp, list) or isinstance(resp, dict) or isinstance(resp, bool):
     return resp
   else:
