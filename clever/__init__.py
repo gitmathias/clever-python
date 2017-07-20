@@ -17,6 +17,7 @@ import types
 import base64
 import pkg_resources
 import six
+import math
 # Use cStringIO if ita's available.  Otherwise, StringIO is fine.
 try:
   import cStringIO as StringIO
@@ -82,25 +83,41 @@ logger = logging.getLogger('clever')
 
 # Use certs chain bundle including in the package for SSL verification
 CLEVER_CERTS = pkg_resources.resource_filename(__name__, 'data/clever.com_ca_bundle.crt')
-API_VERSION = "v1.2"
 
 # Configuration variables
-
 global_auth = dict()
-api_base = 'https://api.clever.com'
-verify_ssl_certs = True
+global_options = {
+    'api_base': 'https://api.clever.com',
+    'api_version': 'v1.1',
+    'verify_ssl_certs': True,
 
-# Manually set this value to True to skip Clever data types?
-USE_RAW_DATA = False
+    # If True, API objects will be returned as dictionaries
+    # rather than Clever object instances:
+    'use_raw_data': False,
+
+    # Set the page size for listable API requests:
+    'listable_page_size': 1000
+}
+
 
 def set_token(token):
   global global_auth
   global_auth = {'token': token}
 
-
 def get_token():
   global global_auth
   return global_auth.get('token', None)
+
+def get_option(key, default=None):
+  global global_options
+  return global_options[key] if key in global_options else default
+
+def set_option(key, value):
+  global global_options
+  if key in global_options:
+    global_options[key] = value
+  else:
+    raise KeyError("Option not defined for key %s" % key)
 
 # Exceptions
 
@@ -140,11 +157,10 @@ def convert_to_clever_object(klass, resp, auth):
   # TODO: to support includes we'll have to infer klass from resp['uri']
   if isinstance(resp, dict) and resp.get('data', None):
     if isinstance(resp['data'], list):
-      return [convert_to_clever_object(klass, i, auth) for i in resp['data']] \
-              if not USE_RAW_DATA else resp['data']
+      return [convert_to_clever_object(klass, i, auth) for i in resp['data']]
     elif isinstance(resp['data'], dict):
       return klass.construct_from(resp['data'].copy(), auth) \
-              if not USE_RAW_DATA else resp['data']
+              if not get_option('use_raw_data') else resp['data']
   elif isinstance(resp, six.string_types) or isinstance(resp, list) or isinstance(resp, dict) or isinstance(resp, bool):
     return resp
   else:
@@ -172,7 +188,7 @@ class APIRequestor(object):
 
   @classmethod
   def api_url(cls, path=''):
-    return '%s%s' % (api_base, path)
+    return '%s%s' % (get_option('api_base'), path)
 
   @classmethod
   def _utf8(cls, value):
@@ -261,7 +277,7 @@ class APIRequestor(object):
 
     headers = {
         'X-Clever-Client-User-Agent': json.dumps(ua),
-        'User-Agent': 'Clever/%s PythonBindings/%s' % (API_VERSION, VERSION)
+        'User-Agent': 'Clever/%s PythonBindings/%s' % (get_option('api_version'), VERSION)
     }
     if my_auth.get('api_key', None) != None:
       headers['Authorization'] = 'Basic {}'.format(base64.b64encode(my_auth['api_key'] + ':'))
@@ -274,6 +290,7 @@ class APIRequestor(object):
       'urllib2': self.urllib2_request
     }
     if _httplib in make_request:
+      # print("Making Request: {0}\nPARAMS: {1}".format(abs_url, params))
       res = make_request[_httplib](meth, abs_url, headers, params)
     else:
       raise CleverError(
@@ -288,10 +305,10 @@ class APIRequestor(object):
     # Get the encoding from the response to convert from byte string:
     encoding = None
     if 'Content-Type' in rheaders:
-      encoding = None if rheaders['Content-Type'].rfind('=') == -1 \
+      # print("Content-Type: %s" % rheaders['Content-Type'])
+      encoding = 'utf-8' if rheaders['Content-Type'].rfind('=') == -1 \
                       else rheaders['Content-Type'].rsplit('=', 1)[-1]
 
-    rbody = rbody.decode(encoding)
     try:
       resp = json.loads(rbody, encoding) if rcode != 429 else {'error': 'Too Many Requests'}
     except Exception as err:
@@ -406,10 +423,10 @@ class APIRequestor(object):
                 pycurl.E_COULDNT_RESOLVE_HOST,
                 pycurl.E_OPERATION_TIMEOUTED]:
       msg = "Could not connect to Clever (%s).  Please check your internet connection and try again.  If this problem persists, you should check Clever's service status at http://status.clever.com." % (
-          api_base, )
+          get_option('api_base'), )
     elif e[0] == pycurl.E_SSL_CACERT or e[0] == pycurl.E_SSL_PEER_CERTIFICATE:
       msg = "Could not verify Clever's SSL certificate.  Please make sure that your network is not intercepting certificates.  (Try going to %s in your browser)." % (
-          api_base, )
+          get_option('api_base'), )
     else:
       msg = "Unexpected error communicating with Clever.  If this problem persists, let us know at tech-support@clever.com."
     msg = textwrap.fill(msg) + "\n\n(Network error: " + e[1] + ")"
@@ -683,7 +700,7 @@ class APIResource(CleverObject):
   @classmethod
   def class_url(cls):
     cls_name = cls.class_name()
-    return "/%s/%ss" % (API_VERSION, cls_name)
+    return "/%s/%ss" % (get_option('api_version'), cls_name)
 
   def instance_url(self):
     id = self.get('id')
@@ -706,11 +723,31 @@ def get_link(response, rel):
   return None
 
 class ListableAPIResource(APIResource):
-  ITER_LIMIT = 1000
+  ITER_LIMIT = get_option('listable_page_size')
 
   @classmethod
   def all(cls, auth=None, **params):
     return list(cls.iter(auth, **params))
+
+  @classmethod
+  def count(cls, auth=None, **params):
+    counts = {
+      'records': 0,
+      'pages': 0
+    }
+
+    requestor = APIRequestor(auth)
+    url = cls.class_url()
+    params['limit'] = 1
+
+    response, auth = requestor.request('get', url, params)
+    if 'paging' in response:
+      if 'total' in response['paging']:
+        counts['pages'] = int(math.ceil(response['paging']['count'] / float(cls.ITER_LIMIT)))
+      if 'count' in response['paging']:
+        counts['records'] = response['paging']['count']
+
+    return counts
 
   @classmethod
   def iter(cls, auth=None, **params):
@@ -719,21 +756,63 @@ class ListableAPIResource(APIResource):
         raise CleverError("ListableAPIResource does not support '%s' parameter" %
                           (unsupported_param,))
 
-    requestor = APIRequestor(auth)
-    url = cls.class_url()
-    params['limit'] = cls.ITER_LIMIT
+    # This seems weird, just need to kick off the while loop:
+    page_count = 0
+    next_url = None
+    while next_url or page_count == 0:
+        page_data = cls._get_page(auth, next_url, **params)
+        for datum in page_data['data']:
+            yield datum
+        next_url = page_data['next_url']
+        page_count += 1
 
-    while url:
+  @classmethod
+  def stream(cls, auth=None, **params):
+    page_count = 0
+    next_url = None
+    while next_url or page_count == 0:
+        page_count += 1
+        page_data = cls._get_page(auth, next_url, **params)
+        next_url = page_data['next_url']
+        yield page_data
+
+        # progress meter... ten dots per row
+        if page_count % 10 == 0:
+            print()
+
+    # clear dots from _get_page
+    print()
+
+  @classmethod
+  def _get_page(cls, auth=None, page_url=None, **params):
+    # progress meter... one dot per page
+    print('.', end='')
+    sys.stdout.flush()
+
+    page_data = {
+      'data': None,
+      'next_url': None
+    }
+
+    requestor = APIRequestor(auth)
+
+    if page_url is not None:
+        url = page_url
+        params = {}
+    else:
+        url = cls.class_url()
+        params['limit'] = cls.ITER_LIMIT
+
+    if url:
       response, auth = requestor.request('get', url, params)
       # Generate nothing when there is no data.
-      if len(response['data']) == 0:
-        break
-      for datum in convert_to_clever_object(cls, response, auth):
-        yield datum
+      if len(response['data']) != 0:
+        page_data = {
+          'data': convert_to_clever_object(cls, response, auth),
+          'next_url': get_link(response, 'prev' if 'ending_before' in params else 'next')
+        }
 
-      url = get_link(response, 'prev' if 'ending_before' in params else 'next')
-      # params already included in url from get_link
-      params = {}
+    return page_data
 
 
 class CreatableAPIResource(APIResource):
@@ -785,7 +864,7 @@ class District(ListableAPIResource):
 class DistrictAdmin(ListableAPIResource):
   @classmethod
   def class_url(cls):
-    return "/%s/district_admins" % API_VERSION
+    return "/%s/district_admins" % get_option('api_version')
 
 
 class School(ListableAPIResource):
@@ -795,7 +874,7 @@ class School(ListableAPIResource):
 class SchoolAdmin(ListableAPIResource):
   @classmethod
   def class_url(cls):
-    return "/%s/school_admins" % API_VERSION
+    return "/%s/school_admins" % get_option('api_version')
 
 
 class Section(ListableAPIResource):
