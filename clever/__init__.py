@@ -858,7 +858,21 @@ class Contact(ListableAPIResource):
 
 
 class District(ListableAPIResource):
-  pass
+  @classmethod
+  def status(cls, id, auth=None):
+    cls_name = cls.class_name()
+    requestor = APIRequestor(auth)
+    url = '/{0}/{1}s/{2}/status'.format(
+        get_option('api_version'),
+        cls_name,
+        id)
+    response, auth = requestor.request('get', url)
+
+    status_data = None
+    if response['data']:
+        # Only expect one status data node - one district id
+        status_data = response['data'][0]['data']
+    return status_data
 
 
 class DistrictAdmin(ListableAPIResource):
